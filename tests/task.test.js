@@ -1,42 +1,87 @@
 const request = require("supertest");
-const app = require("../src/server");
 const mongoose = require("mongoose");
+const { MongoMemoryServer } = require("mongodb-memory-server");
+const jwt = require("jsonwebtoken");
+const app = require("../src/server");
 const Task = require("../src/models/Task");
+const User = require("../src/models/User");
 
+let mongoServer;
 let token;
+let userId;
+process.env.JWT_SECRET = 'test-jwt-secret'; 
 
 beforeAll(async () => {
-  await request(app).post("/api/auth/register").send({
+  mongoServer = await MongoMemoryServer.create();
+  const mongoUri = mongoServer.getUri();
+  await mongoose.connect(mongoUri);
+
+  const user = new User({
     username: "testuser",
     email: "test@example.com",
-    password: "password123",
+    password: "$2a$10$hashedpassword",
   });
+  await user.save();
+  userId = user._id;
 
-  const res = await request(app).post("/api/auth/login").send({
-    email: "test@example.com",
-    password: "password123",
-  });
-  token = res.body.token;
+  token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: "1h" });
 });
 
 afterAll(async () => {
   await mongoose.connection.close();
+  await mongoServer.stop();
+});
+
+beforeEach(async () => {
+  await Task.deleteMany({});
 });
 
 describe("Task Routes", () => {
   test("Create a task", async () => {
-    const res = await request(app)
+    const response = await request(app)
       .post("/api/tasks")
-      .set("Authorization", token)
-      .send({ title: "Test Task", description: "Test Description" });
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        title: "New Task",
+        description: "Test Description",
+      });
 
-    expect(res.statusCode).toBe(201);
-    expect(res.body.title).toBe("Test Task");
+    expect(response.status).toBe(201);
+    expect(response.body.title).toBe("New Task");
   });
 
-  test("Get all tasks", async () => {
-    const res = await request(app).get("/api/tasks").set("Authorization", token);
-    expect(res.statusCode).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
+  test("Get all tasks for a user", async () => {
+    await Task.create({ title: "Task 1", userId });
+    await Task.create({ title: "Task 2", userId });
+
+    const response = await request(app)
+      .get("/api/tasks")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.length).toBe(2);
+  });
+
+  test("Update a task", async () => {
+    const task = await Task.create({ title: "Task to Update", userId });
+
+    const response = await request(app)
+      .put(`/api/tasks/${task._id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ title: "Updated Task" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.title).toBe("Updated Task");
+  });
+
+  test("Delete a task", async () => {
+    const task = await Task.create({ title: "Task to Delete", userId });
+
+    const response = await request(app)
+      .delete(`/api/tasks/${task._id}`)
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.message).toBe("Task deleted");
   });
 });
